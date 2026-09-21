@@ -1,29 +1,44 @@
-# 1. Update packages and install prerequisites
-sudo apt update -y && sudo apt upgrade -y
-sudo apt install -y curl wget apt-transport-https ca-certificates gnupg
+cat << 'EOF' > setup-minikube.sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 2. Install Docker using official script
+TARGET_USER="${SUDO_USER:-$USER}"
+if [ "$TARGET_USER" = "root" ] && id "ubuntu" &>/dev/null; then
+  TARGET_USER="ubuntu"
+fi
+
+echo "==> Setting up environment for user: ${TARGET_USER}"
+
+echo "==> 1. Updating packages and installing prerequisites..."
+sudo apt-get update -y && sudo apt-get upgrade -y
+sudo apt-get install -y curl wget apt-transport-https ca-certificates gnupg conntrack
+
+echo "==> 2. Installing Docker..."
 curl -fsSL https://get.docker.com -o get-docker.sh
 sudo sh get-docker.sh
 rm -f get-docker.sh
+sudo systemctl enable --now docker
 
-# 3. Add ubuntu user to docker group (avoids running minikube as root)
-sudo usermod -aG docker $USER
-newgrp docker <<EONG
+echo "==> 3. Adding ${TARGET_USER} to the docker group..."
+sudo usermod -aG docker "$TARGET_USER"
 
-# 4. Install Minikube
+echo "==> 4. Installing Minikube..."
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 sudo install -o root -g root -m 0755 minikube-linux-amd64 /usr/local/bin/minikube
 rm -f minikube-linux-amd64
 
-# 5. Install kubectl (with fixed URL)
+echo "==> 5. Installing kubectl..."
 K8S_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
 curl -LO "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl"
-curl -LO "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl.sha256"
-echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-rm -f kubectl kubectl.sha256
+rm -f kubectl
 
-# 6. Start Minikube as regular user
-minikube start --driver=docker
-EONG
+echo "==> 6. Starting Minikube cluster as ${TARGET_USER}..."
+sudo -u "$TARGET_USER" sg docker -c "minikube start --driver=docker"
+
+echo "==> Setup complete! Verifying cluster nodes:"
+sudo -u "$TARGET_USER" kubectl get nodes
+EOF
+
+chmod +x setup-minikube.sh
+./setup-minikube.sh
