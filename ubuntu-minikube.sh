@@ -1,97 +1,94 @@
-cat << 'EOF' > /root/minikube-lab.sh
 #!/usr/bin/env bash
 
 # ==============================================================================
-# SCRIPT CONFIGURATION & ERROR HANDLING
+# RUNTIME ENVIRONMENT & ERROR HANDLING
 # ==============================================================================
+# If executed via 'sh abc.sh' (which uses Dash on Ubuntu), switch immediately to Bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 # -e: Exit immediately if any command returns a non-zero exit code.
-# -u: Treat unset or uninitialized variables as an error and exit.
-# -o pipefail: Pipeline fails if any command in the pipe fails (not just the last).
+# -u: Treat unset or uninitialized variables as an error.
+# -o pipefail: Catch pipeline errors if an earlier command in a pipe fails.
 set -euo pipefail
 
-# ==============================================================================
-# PRIVILEGE VALIDATION
-# ==============================================================================
-# $EUID holds the Effective User ID. Root always has a User ID of 0.
-# If EUID is not equal (-ne) to 0, stop execution to prevent permission failures.
-if [ "$EUID" -ne 0 ]; then
-  echo "Error: This script must be executed as the root user." >&2
+# Verify root permissions using user ID (0 is always root)
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Error: This script must be executed as root." >&2
   exit 1
 fi
 
 # ==============================================================================
 # FUNCTION: install_dependencies
-# Idempotent check: Verifies if packages exist before downloading or installing.
+# Checks if binaries exist in PATH so it never re-downloads tools on future runs.
 # ==============================================================================
 install_dependencies() {
-  echo "==> [1/4] Checking and installing prerequisites..."
-  # -qq: Quiet mode (suppresses standard progress bars to keep logs clean)
-  # >/dev/null: Discards stdout so only actual errors are printed to screen
+  echo "==> [1/4] Checking and installing system packages..."
   apt-get update -y -qq >/dev/null
   apt-get install -y -qq curl wget apt-transport-https ca-certificates gnupg conntrack >/dev/null
 
-  # Check if Docker is installed. 'command -v' exits with 0 if found, non-zero if missing.
+  # 1. Docker Installation
   if ! command -v docker &>/dev/null; then
-    echo "==> Docker not found. Installing via official convenience script..."
+    echo "==> Installing Docker Engine..."
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sh /tmp/get-docker.sh
     rm -f /tmp/get-docker.sh
+  else
+    echo "==> Docker is already installed."
   fi
-
-  # Ensure the Docker daemon is enabled on system boot and currently running
   systemctl enable --now docker
 
-  # Check if Minikube binary exists in $PATH
+  # 2. Minikube Installation
   if ! command -v minikube &>/dev/null; then
-    echo "==> Minikube not found. Downloading latest Linux AMD64 binary..."
+    echo "==> Downloading Minikube binary..."
     curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-    # 'install' copies the file, sets ownership to root:root, and grants execute permissions (0755)
     install -o root -g root -m 0755 minikube-linux-amd64 /usr/local/bin/minikube
     rm -f minikube-linux-amd64
+  else
+    echo "==> Minikube binary is already installed."
   fi
 
-  # Check if kubectl binary exists in $PATH
+  # 3. kubectl Installation
   if ! command -v kubectl &>/dev/null; then
-    echo "==> kubectl not found. Fetching stable release..."
+    echo "==> Downloading kubectl stable release..."
     local k8s_version
-    # Query the stable Kubernetes API to retrieve the current recommended version string (e.g., v1.31.0)
     k8s_version=$(curl -L -s https://dl.k8s.io/release/stable.txt)
     curl -LO "https://dl.k8s.io/release/${k8s_version}/bin/linux/amd64/kubectl"
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
     rm -f kubectl
+  else
+    echo "==> kubectl binary is already installed."
   fi
 }
 
 # ==============================================================================
 # FUNCTION: start_cluster
-# Ensures dependencies exist, then boots or joins the Minikube cluster.
+# Checks prerequisites, launches the cluster with the root override, and checks nodes.
 # ==============================================================================
 start_cluster() {
-  # Run dependency check first
   install_dependencies
 
   echo "==> [2/4] Checking Minikube status..."
-  # If 'minikube status' succeeds (exit code 0), the cluster is already healthy
   if minikube status &>/dev/null; then
-    echo "==> Minikube is already up and running."
+    echo "==> Minikube cluster is already up and running."
   else
-    echo "==> [3/4] Starting Minikube control plane..."
-    # --driver=docker: Runs Kubernetes inside a Docker container
-    # --force: Bypasses Minikube's built-in block that prevents running as root
+    echo "==> [3/4] Starting Minikube cluster as root..."
+    # --driver=docker: runs Kubernetes control plane inside a Docker container
+    # --force: bypasses Minikube's built-in block against running as root
     minikube start --driver=docker --force
   fi
 
-  echo "==> [4/4] Verifying cluster nodes via kubectl:"
+  echo "==> [4/4] Minikube is Ready! Active Cluster Nodes:"
   kubectl get nodes
 }
 
 # ==============================================================================
 # FUNCTION: reset_cluster
-# Deletes the active cluster and recreates it from scratch for a clean lab.
+# Deletes any broken or existing cluster and builds a fresh one from scratch.
 # ==============================================================================
 reset_cluster() {
-  echo "==> Deleting current Minikube environment..."
-  # '|| true' ensures that even if no cluster exists to delete, the script won't abort
+  echo "==> Deleting existing Minikube cluster..."
   minikube delete || true
   echo "==> Initializing fresh cluster..."
   start_cluster
@@ -99,7 +96,7 @@ reset_cluster() {
 
 # ==============================================================================
 # FUNCTION: stop_cluster
-# Pauses container runtime to free up CPU and RAM on your EC2 instance.
+# Pauses Minikube containers to free up EC2 CPU/RAM when taking a break.
 # ==============================================================================
 stop_cluster() {
   echo "==> Halting Minikube containers..."
@@ -108,21 +105,21 @@ stop_cluster() {
 
 # ==============================================================================
 # FUNCTION: status_cluster
-# Shows component status (kubelet, apiserver, kubeconfig) and node status.
+# Shows component status (kubelet, apiserver) and node availability.
 # ==============================================================================
 status_cluster() {
-  echo "==> Checking Minikube component health:"
+  echo "==> Minikube Service Status:"
   minikube status || true
   echo ""
-  echo "==> Querying Kubernetes API for node readiness:"
+  echo "==> Cluster Nodes:"
   kubectl get nodes || true
 }
 
 # ==============================================================================
-# SCRIPT ROUTER / CLI ARGUMENT PARSER
+# SCRIPT ROUTER
+# Defaults to 'start' when executed with no arguments (e.g. 'sh abc.sh').
+# Supports: 'sh abc.sh reset', 'sh abc.sh stop', 'sh abc.sh status'
 # ==============================================================================
-# ${1:-start}: Reads the first argument passed in the terminal ($1).
-# If no argument is provided, it defaults to "start".
 case "${1:-start}" in
   start)
     start_cluster
@@ -137,12 +134,7 @@ case "${1:-start}" in
     status_cluster
     ;;
   *)
-    # Display usage instructions if an unknown flag or parameter is supplied
     echo "Usage: $0 {start|reset|stop|status}"
     exit 1
     ;;
 esac
-EOF
-
-# Grant execute permissions to the script file
-chmod +x /root/minikube-lab.sh
