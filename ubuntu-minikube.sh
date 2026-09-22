@@ -29,15 +29,9 @@ install_dependencies() {
   apt-get install -y -qq curl wget apt-transport-https ca-certificates gnupg conntrack >/dev/null
 
   # 1. Docker Installation
-  if ! command -v docker &>/dev/null; then
-    echo "==> Installing Docker Engine..."
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-    sh /tmp/get-docker.sh
-    rm -f /tmp/get-docker.sh
-  else
-    echo "==> Docker is already installed."
-  fi
-  systemctl enable --now docker
+  apt-get update -y
+apt-get install -y docker.io
+systemctl enable --now docker
 
   # 2. Minikube Installation
   if ! command -v minikube &>/dev/null; then
